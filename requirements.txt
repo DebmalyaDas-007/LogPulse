@@ -1,0 +1,5 @@
+kafka-python==2.2.0
+elasticsearch==8.15.1
+pytest==8.3.3
+# pyspark is only needed to run the detector outside Docker (requires Java 17):
+# pyspark==3.5.3

@@ -1,0 +1,14 @@
+# Optional override for NVIDIA GPUs:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml ...
+# Requires the NVIDIA Container Toolkit. Also add the RAPIDS jar to the spark-submit --packages list.
+services:
+  detector:
+    environment:
+      SPARK_GPU_ENABLED: "true"
+      NVIDIA_VISIBLE_DEVICES: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

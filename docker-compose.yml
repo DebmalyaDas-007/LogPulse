@@ -1,0 +1,100 @@
+services:
+  kafka:
+    image: apache/kafka:3.8.1
+    hostname: kafka
+    container_name: sentinel-kafka
+    ports:
+      - "${KAFKA_EXTERNAL_PORT:-9094}:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT:-9094}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 15s
+      retries: 12
+      start_period: 30s
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-8.15.3}
+    hostname: elasticsearch
+    container_name: sentinel-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      # Local development only: lets the demo start on machines that are low on disk space.
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION:-8.15.3}
+    container_name: sentinel-kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5601/api/status >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  detector:
+    profiles: ["streaming"]
+    build:
+      context: .
+      dockerfile: spark_jobs/Dockerfile
+    container_name: sentinel-detector
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC_SERVER_LOGS: ${KAFKA_TOPIC_SERVER_LOGS:-server-logs}
+      KAFKA_TOPIC_ANOMALIES: ${KAFKA_TOPIC_ANOMALIES:-anomalies}
+      KAFKA_STARTING_OFFSETS: ${KAFKA_STARTING_OFFSETS:-latest}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SPARK_LOG_LEVEL: ${SPARK_LOG_LEVEL:-WARN}
+      SPARK_CHECKPOINT_LOCATION: /checkpoint
+      SPARK_GPU_ENABLED: ${SPARK_GPU_ENABLED:-false}
+      WINDOW_SECONDS: ${WINDOW_SECONDS:-60}
+      THRESHOLD_UNAUTHORIZED: ${THRESHOLD_UNAUTHORIZED:-100}
+      THRESHOLD_ERROR_RATE: ${THRESHOLD_ERROR_RATE:-0.01}
+      THRESHOLD_SURGE_MULTIPLIER: ${THRESHOLD_SURGE_MULTIPLIER:-5}
+    volumes:
+      - spark-checkpoint:/checkpoint
+
+volumes:
+  kafka-data:
+  es-data:
+  spark-checkpoint:

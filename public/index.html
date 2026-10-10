@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log Sentinel</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --line: #e3e6ec; --text: #1c2230; --muted: #6b7486;
+    --accent: #2563eb; --critical: #dc2626; --high: #ea580c; --medium: #ca8a04; --low: #2563eb; --ok: #16a34a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1118; --card: #161b26; --line: #252c3b; --text: #e8ebf2; --muted: #8b95a9; --accent: #5b8def; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; background: var(--card); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 17px; }
+  header small { color: var(--muted); }
+  .pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; background: var(--muted); }
+  .pill.live { background: var(--ok); } .pill.demo { background: var(--medium); } .pill.error { background: var(--critical); }
+  main { padding: 20px 24px; display: grid; gap: 16px; max-width: 1300px; margin: 0 auto; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+  .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .kpi .value { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .kpi .sub { color: var(--muted); font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .wide { grid-column: 1 / -1; }
+  .bar { display: grid; grid-template-columns: 90px 1fr 56px; gap: 8px; align-items: center; margin: 6px 0; }
+  .bar .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .bar .track { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
+  .bar .fill { height: 100%; background: var(--accent); border-radius: 5px; }
+  .bar .num { text-align: right; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .sev { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; color: #fff; text-transform: uppercase; }
+  .sev.critical { background: var(--critical); } .sev.high { background: var(--high); } .sev.medium { background: var(--medium); } .sev.low { background: var(--low); }
+  .empty { color: var(--muted); padding: 12px 0; }
+  svg text { fill: var(--muted); font-size: 11px; }
+  .overflow { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Log Sentinel</h1><small>Real-time server log anomaly detection</small></div>
+  <div><small id="updated"></small> <span class="pill" id="mode">connecting</span></div>
+</header>
+<main>
+  <section class="kpis">
+    <div class="card kpi"><h2>Requests</h2><div class="value" id="k-requests">-</div></div>
+    <div class="card kpi"><h2>Anomalies</h2><div class="value" id="k-anomalies">-</div></div>
+    <div class="card kpi"><h2>401 / 403</h2><div class="value" id="k-unauth">-</div></div>
+    <div class="card kpi"><h2>Avg latency</h2><div class="value" id="k-latency">-</div><div class="sub" id="k-pct"></div></div>
+  </section>
+
+  <section class="card wide"><h2>Requests per minute (last hour)</h2><div id="trend"></div></section>
+
+  <section class="grid">
+    <div class="card"><h2>Anomalies by type</h2><div id="types"></div></div>
+    <div class="card"><h2>Anomalies by severity</h2><div id="severity"></div></div>
+    <div class="card"><h2>Status codes</h2><div id="status"></div></div>
+    <div class="card"><h2>Top client IPs</h2><div id="ips"></div></div>
+  </section>
+
+  <section class="card wide overflow">
+    <h2>Recent anomalies</h2>
+    <table>
+      <thead><tr><th>Window start</th><th>Type</th><th>Severity</th><th>Client IP</th><th>Details</th></tr></thead>
+      <tbody id="recent"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => Number(n || 0).toLocaleString();
+const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function bars(el, rows) {
+  if (!rows || !rows.length) { el.innerHTML = '<div class="empty">No data yet</div>'; return; }
+  const max = Math.max(...rows.map((r) => r.value), 1);
+  el.innerHTML = rows.map((r) => `
+    <div class="bar"><span class="name" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</span>
+    <span class="track"><span class="fill" style="display:block;width:${(r.value / max) * 100}%"></span></span>
+    <span class="num">${fmt(r.value)}</span></div>`).join("");
+}
+
+function line(el, points) {
+  if (!points || points.length < 2) { el.innerHTML = '<div class="empty">Waiting for traffic...</div>'; return; }
+  const W = 1000, H = 180, pad = 28;
+  const max = Math.max(...points.map((p) => p.value), 1);
+  const x = (i) => pad + (i / (points.length - 1)) * (W - pad * 2);
+  const y = (v) => H - pad - (v / max) * (H - pad * 2);
+  const path = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
+  const area = `${path} L${x(points.length - 1)},${H - pad} L${x(0)},${H - pad} Z`;
+  const ticks = [0, Math.floor(points.length / 2), points.length - 1];
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Requests per minute">
+    <line x1="${pad}" x2="${W - pad}" y1="${H - pad}" y2="${H - pad}" stroke="var(--line)"/>
+    <path d="${area}" fill="var(--accent)" opacity=".12"/>
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2"/>
+    <text x="${pad}" y="14">${fmt(max)} max</text>
+    ${ticks.map((i) => `<text x="${x(i)}" y="${H - 8}" text-anchor="${i === 0 ? "start" : i === points.length - 1 ? "end" : "middle"}">${escapeHtml(points[i].label)}</text>`).join("")}
+  </svg>`;
+}
+
+function render(d) {
+  $("k-requests").textContent = fmt(d.kpis.totalRequests);
+  $("k-anomalies").textContent = fmt(d.kpis.totalAnomalies);
+  $("k-unauth").textContent = fmt(d.kpis.unauthorizedAttempts);
+  $("k-latency").textContent = `${Math.round(d.kpis.avgLatency)} ms`;
+  $("k-pct").textContent = `p50 ${Math.round(d.kpis.p50)} / p95 ${Math.round(d.kpis.p95)} / p99 ${Math.round(d.kpis.p99)} ms`;
+  line($("trend"), d.requestsOverTime);
+  bars($("types"), d.anomalyTypes);
+  bars($("severity"), d.severity);
+  bars($("status"), d.statusDistribution);
+  bars($("ips"), d.topClientIps);
+  $("recent").innerHTML = d.recentAnomalies.length
+    ? d.recentAnomalies.map((a) => `<tr>
+        <td>${escapeHtml(new Date(a.window_start).toLocaleString())}</td>
+        <td>${escapeHtml(a.anomaly_type)}</td>
+        <td><span class="sev ${escapeHtml(a.severity)}">${escapeHtml(a.severity)}</span></td>
+        <td>${escapeHtml(a.client_ip || "-")}</td>
+        <td>${escapeHtml(a.message)}</td></tr>`).join("")
+    : '<tr><td colspan="5" class="empty">No anomalies detected yet</td></tr>';
+  setMode(d.mode, d.mode);
+  $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+function setMode(cls, text) { const el = $("mode"); el.className = `pill ${cls}`; el.textContent = text; }
+
+async function refresh() {
+  try {
+    const response = await fetch("/api/dashboard", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.statusText);
+    render(body);
+  } catch (error) {
+    setMode("error", "elasticsearch unreachable");
+    $("updated").textContent = error.message.slice(0, 90);
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
